@@ -18,4 +18,21 @@ print(f"OPENROUTER_API_KEY: {'✅ Установлен' if OPENROUTER_API_KEY el
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('🤖 Бот работает! Тест успешен!')
 
-async def handle_message(update: Update, context
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f'✅ Получил ваше сообщение: "{update.message.text}"')
+
+def main():
+    if not TELEGRAM_TOKEN:
+        print("❌ ОШИБКА: TELEGRAM_TOKEN не установлен!")
+        return
+    
+    print("🚀 Запуск бота...")
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT, handle_message))
+    
+    print("✅ Бот успешно запущен!")
+    app.run_polling()
+
+if __name__ == '__main__':
+    main()
