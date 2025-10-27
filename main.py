@@ -1,6 +1,10 @@
 import os
 import logging
 import requests
+import io
+import aiohttp
+from gtts import gTTS
+from pydub import AudioSegment
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from flask import Flask
@@ -65,24 +69,144 @@ print("🔧 Проверка переменных окружения...")
 print(f"TELEGRAM_TOKEN: {'✅ Установлен' if TELEGRAM_TOKEN else '❌ Отсутствует'}")
 print(f"OPENROUTER_API_KEY: {'✅ Установлен' if OPENROUTER_API_KEY else '❌ Отсутствует'}")
 
+# Функция для преобразования текста в речь
+async def text_to_speech(text: str, lang: str = 'ru') -> io.BytesIO:
+    """Преобразует текст в голосовое сообщение"""
+    try:
+        # Создаем TTS объект
+        tts = gTTS(text=text, lang=lang, slow=False)
+        
+        # Сохраняем в байтовый поток
+        mp3_fp = io.BytesIO()
+        tts.write_to_fp(mp3_fp)
+        mp3_fp.seek(0)
+        
+        # Конвертируем MP3 в OGG (Telegram предпочитает OGG для голосовых)
+        audio = AudioSegment.from_mp3(mp3_fp)
+        ogg_fp = io.BytesIO()
+        audio.export(ogg_fp, format="ogg")
+        ogg_fp.seek(0)
+        
+        return ogg_fp
+        
+    except Exception as e:
+        print(f"Ошибка TTS: {e}")
+        return None
+
+# Функция для обработки голосовых сообщений
+async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает голосовые сообщения от пользователя"""
+    voice = update.message.voice
+    
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    
+    try:
+        # Получаем информацию о файле голосового сообщения
+        voice_file = await voice.get_file()
+        
+        # Скачиваем голосовое сообщение
+        async with aiohttp.ClientSession() as session:
+            async with session.get(voice_file.file_path) as response:
+                if response.status == 200:
+                    voice_data = await response.read()
+                    
+                    # Здесь можно добавить распознавание речи (STT)
+                    # Пока просто отвечаем текстом, что получили голосовое
+                    response_text = "🎤 Я получил ваше голосовое сообщение! Пока я умею только отвечать голосом на текстовые сообщения. Используйте команду /voice"
+                    
+                    # Отправляем текстовый ответ
+                    await update.message.reply_text(response_text)
+                    
+                else:
+                    await update.message.reply_text("❌ Не удалось обработать голосовое сообщение")
+    
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Ошибка обработки голоса: {str(e)}")
+
+# Команда /voice - преобразует текст в голосовое сообщение
+async def voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Преобразует текстовый ответ AI в голосовое сообщение"""
+    user_message = ' '.join(context.args)
+    
+    if not user_message:
+        await update.message.reply_text(
+            "🎤 **Голосовые ответы**\n\n"
+            "Напишите текст после команды /voice\n"
+            "Например: /voice привет, как дела?\n\n"
+            "Или просто напишите сообщение, и я отвечу голосом!"
+        )
+        return
+    
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="record_voice")
+    
+    try:
+        # Получаем ответ от AI (используем существующую логику)
+        user_id = update.effective_user.id
+        current_model_key = user_models.get(user_id, 'deepseek')
+        model_id = AVAILABLE_MODELS[current_model_key]['id']
+        model_name = AVAILABLE_MODELS[current_model_key]['name']
+        
+        headers = {
+            'Authorization': f'Bearer {OPENROUTER_API_KEY}',
+            'Content-Type': 'application/json'
+        }
+        
+        data = {
+            'model': model_id,
+            'messages': [{'role': 'user', 'content': user_message}],
+            'max_tokens': 500  # Укороченный ответ для голосового сообщения
+        }
+        
+        response = requests.post(
+            'https://openrouter.ai/api/v1/chat/completions', 
+            headers=headers, 
+            json=data,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            ai_response = result['choices'][0]['message']['content']
+            
+            # Обрезаем длинный ответ (голосовые сообщения не должны быть слишком длинными)
+            if len(ai_response) > 500:
+                ai_response = ai_response[:497] + "..."
+            
+            # Преобразуем ответ в голос
+            voice_audio = await text_to_speech(ai_response)
+            
+            if voice_audio:
+                # Отправляем голосовое сообщение
+                await update.message.reply_voice(
+                    voice=voice_audio,
+                    caption=f"🎤 {model_name}: {ai_response}"
+                )
+            else:
+                await update.message.reply_text(f"🤖 {model_name}:\n\n{ai_response}")
+        else:
+            await update.message.reply_text("❌ Ошибка подключения к AI")
+            
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Ошибка: {str(e)}")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     # Устанавливаем модель по умолчанию для нового пользователя
     user_models[user_id] = 'deepseek'
     
     await update.message.reply_text(
-        '🤖 Привет! Я мульти-AI бот!\n\n'
-        'Я могу работать с разными нейросетями:\n'
-        '• 🧠 DeepSeek - умные ответы\n'  
-        '• 💻 DeepSeek Coder - для программирования\n'
-        '• 🤖 GPT-3.5 - быстрые ответы\n'
-        '• 🎭 Claude - креативные решения\n'
-        '• 💎 Gemini - мощные возможности\n\n'
-        'Команды:\n'
+        '🤖 Привет! Я мульти-AI бот с **голосовыми ответами**! 🎤\n\n'
+        '**Новые возможности:**\n'
+        '• 🎤 Отвечаю голосом на любые сообщения\n'
+        '• /voice [текст] - преобразую текст в голосовое\n'
+        '• 🎙️ Можете отправлять голосовые сообщения\n\n'
+        '**Основные команды:**\n'
         '/models - список всех моделей\n'
         '/model <имя> - выбрать модель\n'
         '/current - текущая модель\n'
-        '/help - помощь'
+        '/voice - голосовые ответы\n'
+        '/help - помощь\n\n'
+        'Просто напишите мне что-нибудь, и я отвечу голосом! 🎵'
     )
 
 async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -190,11 +314,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/models - список всех моделей AI\n" 
         "/model <ключ> - выбрать модель\n"
         "/current - текущая модель\n"
+        "/voice - голосовые ответы\n"
         "/help - эта справка\n\n"
         "**Примеры:**\n"
         "`/model gpt` - переключиться на GPT\n"
         "`/model claude` - использовать Claude\n"
-        "`/model deepseek` - вернуться к DeepSeek"
+        "`/voice привет` - получить голосовой ответ"
     )
 
 def main():
@@ -220,7 +345,9 @@ def main():
     app_bot.add_handler(CommandHandler("models", models_command))
     app_bot.add_handler(CommandHandler("model", model_command))
     app_bot.add_handler(CommandHandler("current", current_command))
+    app_bot.add_handler(CommandHandler("voice", voice_command))
     app_bot.add_handler(CommandHandler("help", help_command))
+    app_bot.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     print("✅ Мульти-AI бот успешно запущен!")
