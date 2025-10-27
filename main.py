@@ -130,7 +130,7 @@ async def voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not user_message:
         await update.message.reply_text(
-            "🎤 **Голосовые ответы**\n\n"
+            "🎤 Голосовые ответы\n\n"
             "Напишите текст после команды /voice\n"
             "Например: /voice привет, как дела?\n\n"
             "Или просто напишите сообщение, и я отвечу голосом!"
@@ -195,12 +195,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_models[user_id] = 'deepseek'
     
     await update.message.reply_text(
-        '🤖 Привет! Я мульти-AI бот с **голосовыми ответами**! 🎤\n\n'
-        '**Новые возможности:**\n'
+        '🤖 Привет! Я мульти-AI бот с голосовыми ответами! 🎤\n\n'
+        'Новые возможности:\n'
         '• 🎤 Отвечаю голосом на любые сообщения\n'
         '• /voice [текст] - преобразую текст в голосовое\n'
         '• 🎙️ Можете отправлять голосовые сообщения\n\n'
-        '**Основные команды:**\n'
+        'Основные команды:\n'
         '/models - список всех моделей\n'
         '/model <имя> - выбрать модель\n'
         '/current - текущая модель\n'
@@ -210,10 +210,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    models_text = "🛠 **Доступные модели AI:**\n\n"
+    models_text = "🛠 Доступные модели AI:\n\n"
     
     for key, model in AVAILABLE_MODELS.items():
-        models_text += f"**{model['name']}**\n"
+        models_text += f"{model['name']}\n"
         models_text += f"Ключ: `{key}`\n"
         models_text += f"Описание: {model['description']}\n\n"
     
@@ -244,7 +244,7 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     model_info = AVAILABLE_MODELS[model_key]
     
     await update.message.reply_text(
-        f"✅ Модель изменена на: **{model_info['name']}**\n\n"
+        f"✅ Модель изменена на: {model_info['name']}\n\n"
         f"{model_info['description']}"
     )
 
@@ -254,8 +254,8 @@ async def current_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     model_info = AVAILABLE_MODELS[current_model_key]
     
     await update.message.reply_text(
-        f"🔮 **Текущая модель:** {model_info['name']}\n"
-        f"📝 **Описание:** {model_info['description']}\n\n"
+        f"🔮 Текущая модель: {model_info['name']}\n"
+        f"📝 Описание: {model_info['description']}\n\n"
         "Изменить модель: /models"
     )
 
@@ -296,8 +296,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if response.status_code == 200:
             result = response.json()
             bot_response = result['choices'][0]['message']['content']
-            # Добавляем информацию о модели в ответ
-            bot_response = f"🤖 **{model_name}**:\n\n{bot_response}"
+            # Убраны звёздочки из форматирования
+            bot_response = f"🤖 {model_name}:\n\n{bot_response}"
         else:
             bot_response = f"❌ Ошибка подключения к {model_name}. Попробуйте позже."
             
@@ -308,15 +308,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🆘 **Помощь по мульти-AI боту:**\n\n"
-        "**Основные команды:**\n"
+        "🆘 Помощь по мульти-AI боту:\n\n"
+        "Основные команды:\n"
         "/start - начать работу\n"
         "/models - список всех моделей AI\n" 
         "/model <ключ> - выбрать модель\n"
         "/current - текущая модель\n"
         "/voice - голосовые ответы\n"
         "/help - эта справка\n\n"
-        "**Примеры:**\n"
+        "Примеры:\n"
         "`/model gpt` - переключиться на GPT\n"
         "`/model claude` - использовать Claude\n"
         "`/voice привет` - получить голосовой ответ"
