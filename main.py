@@ -3,36 +3,26 @@ import logging
 import requests
 import io
 import aiohttp
+import time
+import threading
+import asyncio
+from datetime import datetime
 from gtts import gTTS
 from pydub import AudioSegment
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from flask import Flask
-import threading
-import asyncio
 
-# Создаем Flask приложение для Health Check
+# ==================== КОНФИГУРАЦИЯ ====================
 app = Flask(__name__)
 
-@app.route('/')
-def home():
-    return "🤖 Multi-AI Bot is running!"
-
-@app.route('/healthz')
-def health_check():
-    return "OK", 200
-
-# Функция для запуска Flask в отдельном потоке
-def run_flask():
-    app.run(host='0.0.0.0', port=5000, debug=False)
-
-# Настройка логирования
+# Настройка продвинутого логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('bot.log')
+        logging.FileHandler('bot.log', encoding='utf-8')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -41,7 +31,12 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 
-# Доступные модели AI
+# ==================== СИСТЕМА ПАМЯТИ ====================
+user_models = {}
+user_stats = {}  # Статистика по пользователям
+conversation_history = {}  # История диалогов
+
+# ==================== МОДЕЛИ AI ====================
 AVAILABLE_MODELS = {
     'deepseek': {
         'name': '🧠 DeepSeek Chat',
@@ -70,17 +65,52 @@ AVAILABLE_MODELS = {
     }
 }
 
-# Хранилище выбранных моделей для пользователей
-user_models = {}
+# ==================== FLASK РОУТЫ ====================
+@app.route('/')
+def home():
+    return "🤖 Multi-AI Bot is running! 🚀"
 
-print("🔧 Проверка переменных окружения...")
-print(f"TELEGRAM_TOKEN: {'✅ Установлен' if TELEGRAM_TOKEN else '❌ Отсутствует'}")
-print(f"OPENROUTER_API_KEY: {'✅ Установлен' if OPENROUTER_API_KEY else '❌ Отсутствует'}")
+@app.route('/healthz')
+def health_check():
+    return {"status": "OK", "timestamp": datetime.now().isoformat()}, 200
 
-# Функция для преобразования текста в речь
+@app.route('/stats')
+def stats():
+    """Статистика бота"""
+    return {
+        "users_count": len(user_models),
+        "active_users": len(user_stats),
+        "timestamp": datetime.now().isoformat()
+    }
+
+def run_flask():
+    app.run(host='0.0.0.0', port=5000, debug=False)
+
+# ==================== СИСТЕМА АКТИВНОСТИ ====================
+def keep_bot_awake():
+    """Периодически пингует сам себя чтобы не засыпать"""
+    def ping():
+        time.sleep(30)  # Ждем запуска Flask
+        while True:
+            try:
+                requests.get("http://localhost:5000/healthz", timeout=10)
+                logger.info("✅ Keep-alive ping sent")
+            except Exception as e:
+                logger.warning(f"⚠️ Keep-alive ping failed: {e}")
+            time.sleep(300)  # Каждые 5 минут
+    
+    ping_thread = threading.Thread(target=ping)
+    ping_thread.daemon = True
+    ping_thread.start()
+
+# ==================== УТИЛИТЫ ====================
 async def text_to_speech(text: str, lang: str = 'ru') -> io.BytesIO:
     """Преобразует текст в голосовое сообщение"""
     try:
+        # Ограничиваем длину текста для голосового сообщения
+        if len(text) > 500:
+            text = text[:497] + "..."
+            
         tts = gTTS(text=text, lang=lang, slow=False)
         mp3_fp = io.BytesIO()
         tts.write_to_fp(mp3_fp)
@@ -94,51 +124,174 @@ async def text_to_speech(text: str, lang: str = 'ru') -> io.BytesIO:
         return ogg_fp
         
     except Exception as e:
-        logger.error(f"Ошибка TTS: {e}")
+        logger.error(f"❌ Ошибка TTS: {e}")
         return None
 
-# Функция для обработки голосовых сообщений
-async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает голосовые сообщения от пользователя"""
-    try:
-        voice = update.message.voice
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-        
-        # Получаем информацию о файле голосового сообщения
-        voice_file = await voice.get_file()
-        
-        # Скачиваем голосовое сообщение
-        async with aiohttp.ClientSession() as session:
-            async with session.get(voice_file.file_path) as response:
-                if response.status == 200:
-                    response_text = "🎤 Я получил ваше голосовое сообщение! Пока я умею только отвечать голосом на текстовые сообщения. Используйте команду /voice"
-                    await update.message.reply_text(response_text)
-                else:
-                    await update.message.reply_text("❌ Не удалось обработать голосовое сообщение")
-    
-    except Exception as e:
-        logger.error(f"Ошибка обработки голоса: {e}")
-        await update.message.reply_text("⚠️ Произошла ошибка при обработке голосового сообщения")
+def update_user_stats(user_id: int):
+    """Обновляет статистику пользователя"""
+    if user_id not in user_stats:
+        user_stats[user_id] = {
+            'first_seen': datetime.now(),
+            'message_count': 0,
+            'last_active': datetime.now()
+        }
+    user_stats[user_id]['message_count'] += 1
+    user_stats[user_id]['last_active'] = datetime.now()
 
-# Команда /voice - преобразует текст в голосовое сообщение
-async def voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Преобразует текстовый ответ AI в голосовое сообщение"""
+# ==================== КОМАНДЫ БОТА ====================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /start"""
     try:
+        user_id = update.effective_user.id
+        user_models[user_id] = 'deepseek'
+        update_user_stats(user_id)
+        
+        welcome_text = (
+            '🤖 **Привет! Я улучшенный мульти-AI бот!** 🚀\n\n'
+            '✨ **Новые возможности:**\n'
+            '• 🧠 **Улучшенная память** - помню ваши предпочтения\n'
+            '• 📊 **Статистика** - отслеживаю активность\n'
+            '• ⚡ **Стабильная работа** - не засыпаю\n'
+            '• 🎤 **Голосовые ответы** - говорю голосом\n\n'
+            '🔧 **Основные команды:**\n'
+            '/start - начать работу\n'
+            '/models - список моделей AI\n'
+            '/model <имя> - выбрать модель\n'
+            '/current - текущая модель\n'
+            '/voice <текст> - голосовой ответ\n'
+            '/stats - моя статистика\n'
+            '/help - помощь\n\n'
+            'Просто напишите мне вопрос! 😊'
+        )
+        
+        await update.message.reply_text(welcome_text)
+        logger.info(f"🎯 Новый пользователь: {user_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в start: {e}")
+        await update.message.reply_text("⚠️ Произошла ошибка при запуске")
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает статистику пользователя"""
+    try:
+        user_id = update.effective_user.id
+        update_user_stats(user_id)
+        
+        if user_id in user_stats:
+            stats = user_stats[user_id]
+            current_model = user_models.get(user_id, 'deepseek')
+            model_name = AVAILABLE_MODELS[current_model]['name']
+            
+            stats_text = (
+                f"📊 **Ваша статистика:**\n\n"
+                f"• 🤖 **Модель по умолчанию:** {model_name}\n"
+                f"• 💬 **Отправлено сообщений:** {stats['message_count']}\n"
+                f"• 🕐 **Первое использование:** {stats['first_seen'].strftime('%d.%m.%Y %H:%M')}\n"
+                f"• ⏰ **Последняя активность:** {stats['last_active'].strftime('%d.%m.%Y %H:%M')}\n\n"
+                f"Всего пользователей: {len(user_stats)}"
+            )
+        else:
+            stats_text = "📊 Статистика пока недоступна"
+            
+        await update.message.reply_text(stats_text)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в stats_command: {e}")
+        await update.message.reply_text("⚠️ Ошибка при получении статистики")
+
+async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает список доступных моделей"""
+    try:
+        update_user_stats(update.effective_user.id)
+        
+        models_text = "🛠 **Доступные модели AI:**\n\n"
+        
+        for key, model in AVAILABLE_MODELS.items():
+            models_text += f"**{model['name']}**\n"
+            models_text += f"Ключ: `{key}`\n"
+            models_text += f"Описание: {model['description']}\n\n"
+        
+        models_text += "Используйте: `/model ключ` для выбора"
+        await update.message.reply_text(models_text)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в models_command: {e}")
+        await update.message.reply_text("⚠️ Ошибка при получении списка моделей")
+
+async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Изменяет выбранную модель"""
+    try:
+        user_id = update.effective_user.id
+        update_user_stats(user_id)
+        
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Укажите модель. Например: `/model deepseek`\n"
+                "Посмотреть все модели: /models"
+            )
+            return
+        
+        model_key = context.args[0].lower()
+        
+        if model_key not in AVAILABLE_MODELS:
+            await update.message.reply_text(
+                f"❌ Модель `{model_key}` не найдена.\n"
+                "Посмотреть доступные модели: /models"
+            )
+            return
+        
+        user_models[user_id] = model_key
+        model_info = AVAILABLE_MODELS[model_key]
+        
+        await update.message.reply_text(
+            f"✅ **Модель изменена на:** {model_info['name']}\n\n"
+            f"{model_info['description']}\n\n"
+            f"Теперь я буду использовать {model_info['name']} для ответов!"
+        )
+        logger.info(f"🔄 Пользователь {user_id} сменил модель на {model_key}")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в model_command: {e}")
+        await update.message.reply_text("⚠️ Ошибка при смене модели")
+
+async def current_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает текущую модель"""
+    try:
+        user_id = update.effective_user.id
+        update_user_stats(user_id)
+        
+        current_model_key = user_models.get(user_id, 'deepseek')
+        model_info = AVAILABLE_MODELS[current_model_key]
+        
+        await update.message.reply_text(
+            f"🔮 **Текущая модель:** {model_info['name']}\n"
+            f"📝 **Описание:** {model_info['description']}\n\n"
+            "Изменить модель: /models"
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в current_command: {e}")
+        await update.message.reply_text("⚠️ Ошибка при получении текущей модели")
+
+async def voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Преобразует текст в голосовое сообщение"""
+    try:
+        user_id = update.effective_user.id
+        update_user_stats(user_id)
         user_message = ' '.join(context.args)
         
         if not user_message:
             await update.message.reply_text(
-                "🎤 Голосовые ответы\n\n"
-                "Напишите текст после команды /voice\n"
-                "Например: /voice привет, как дела?\n\n"
-                "Или просто напишите сообщение, и я отвечу голосом!"
+                "🎤 **Голосовые ответы**\n\n"
+                "Напишите текст после команды:\n"
+                "`/voice Привет! Как дела?`\n\n"
+                "Или просто напишите сообщение, и я отвечу текстом!"
             )
             return
         
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="record_voice")
         
         # Получаем ответ от AI
-        user_id = update.effective_user.id
         current_model_key = user_models.get(user_id, 'deepseek')
         model_id = AVAILABLE_MODELS[current_model_key]['id']
         model_name = AVAILABLE_MODELS[current_model_key]['name']
@@ -165,10 +318,6 @@ async def voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result = response.json()
             ai_response = result['choices'][0]['message']['content']
             
-            # Обрезаем длинный ответ
-            if len(ai_response) > 500:
-                ai_response = ai_response[:497] + "..."
-            
             # Преобразуем ответ в голос
             voice_audio = await text_to_speech(ai_response)
             
@@ -177,104 +326,22 @@ async def voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     voice=voice_audio,
                     caption=f"🎤 {model_name}: {ai_response}"
                 )
+                logger.info(f"🎤 Отправлен голосовой ответ пользователю {user_id}")
             else:
                 await update.message.reply_text(f"🤖 {model_name}:\n\n{ai_response}")
         else:
-            await update.message.reply_text("❌ Ошибка подключения к AI")
+            await update.message.reply_text("❌ Ошибка подключения к AI. Попробуйте позже.")
             
     except Exception as e:
-        logger.error(f"Ошибка в voice_command: {e}")
-        await update.message.reply_text("⚠️ Произошла ошибка при обработке команды")
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
-    try:
-        user_id = update.effective_user.id
-        user_models[user_id] = 'deepseek'
-        
-        await update.message.reply_text(
-            '🤖 Привет! Я мульти-AI бот с голосовыми ответами! 🎤\n\n'
-            'Новые возможности:\n'
-            '• 🎤 Отвечаю голосом на любые сообщения\n'
-            '• /voice [текст] - преобразую текст в голосовое\n'
-            '• 🎙️ Можете отправлять голосовые сообщения\n\n'
-            'Основные команды:\n'
-            '/models - список всех моделей\n'
-            '/model <имя> - выбрать модель\n'
-            '/current - текущая модель\n'
-            '/voice - голосовые ответы\n'
-            '/help - помощь\n\n'
-            'Просто напишите мне что-нибудь, и я отвечу! 🎵'
-        )
-    except Exception as e:
-        logger.error(f"Ошибка в start: {e}")
-
-async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает список доступных моделей"""
-    try:
-        models_text = "🛠 Доступные модели AI:\n\n"
-        
-        for key, model in AVAILABLE_MODELS.items():
-            models_text += f"{model['name']}\n"
-            models_text += f"Ключ: `{key}`\n"
-            models_text += f"Описание: {model['description']}\n\n"
-        
-        models_text += "Используйте: `/model ключ` для выбора"
-        await update.message.reply_text(models_text)
-    except Exception as e:
-        logger.error(f"Ошибка в models_command: {e}")
-
-async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Изменяет выбранную модель"""
-    try:
-        user_id = update.effective_user.id
-        
-        if not context.args:
-            await update.message.reply_text(
-                "❌ Укажите модель. Например: `/model deepseek`\n"
-                "Посмотреть все модели: /models"
-            )
-            return
-        
-        model_key = context.args[0].lower()
-        
-        if model_key not in AVAILABLE_MODELS:
-            await update.message.reply_text(
-                f"❌ Модель `{model_key}` не найдена.\n"
-                "Посмотреть доступные модели: /models"
-            )
-            return
-        
-        user_models[user_id] = model_key
-        model_info = AVAILABLE_MODELS[model_key]
-        
-        await update.message.reply_text(
-            f"✅ Модель изменена на: {model_info['name']}\n\n"
-            f"{model_info['description']}"
-        )
-    except Exception as e:
-        logger.error(f"Ошибка в model_command: {e}")
-
-async def current_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает текущую модель"""
-    try:
-        user_id = update.effective_user.id
-        current_model_key = user_models.get(user_id, 'deepseek')
-        model_info = AVAILABLE_MODELS[current_model_key]
-        
-        await update.message.reply_text(
-            f"🔮 Текущая модель: {model_info['name']}\n"
-            f"📝 Описание: {model_info['description']}\n\n"
-            "Изменить модель: /models"
-        )
-    except Exception as e:
-        logger.error(f"Ошибка в current_command: {e}")
+        logger.error(f"❌ Ошибка в voice_command: {e}")
+        await update.message.reply_text("⚠️ Произошла ошибка при создании голосового сообщения")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает текстовые сообщения"""
     try:
         user_id = update.effective_user.id
         user_message = update.message.text
+        update_user_stats(user_id)
         
         # Получаем выбранную модель пользователя
         current_model_key = user_models.get(user_id, 'deepseek')
@@ -310,13 +377,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bot_response = result['choices'][0]['message']['content']
             # Без звёздочек в форматировании
             bot_response = f"🤖 {model_name}:\n\n{bot_response}"
+            
+            # Сохраняем в историю
+            if user_id not in conversation_history:
+                conversation_history[user_id] = []
+            conversation_history[user_id].append({
+                'question': user_message,
+                'answer': bot_response,
+                'timestamp': datetime.now()
+            })
+            
         else:
             bot_response = f"❌ Ошибка подключения к {model_name}. Попробуйте позже."
             
     except requests.exceptions.Timeout:
         bot_response = "⏰ Таймаут при подключении к AI. Попробуйте позже."
     except Exception as e:
-        logger.error(f"Ошибка в handle_message: {e}")
+        logger.error(f"❌ Ошибка в handle_message: {e}")
         bot_response = f"⚠️ Ошибка в модели {model_name}: {str(e)}"
     
     await update.message.reply_text(bot_response)
@@ -324,29 +401,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает справку"""
     try:
-        await update.message.reply_text(
-            "🆘 Помощь по мульти-AI боту:\n\n"
-            "Основные команды:\n"
+        update_user_stats(update.effective_user.id)
+        
+        help_text = (
+            "🆘 **Помощь по улучшенному AI-боту:**\n\n"
+            "**Основные команды:**\n"
             "/start - начать работу\n"
             "/models - список всех моделей AI\n" 
             "/model <ключ> - выбрать модель\n"
             "/current - текущая модель\n"
-            "/voice - голосовые ответы\n"
+            "/voice <текст> - голосовой ответ\n"
+            "/stats - ваша статистика\n"
             "/help - эта справка\n\n"
-            "Примеры:\n"
+            "**Примеры:**\n"
             "`/model gpt` - переключиться на GPT\n"
             "`/model claude` - использовать Claude\n"
-            "`/voice привет` - получить голосовой ответ"
+            "`/voice Привет!` - получить голосовой ответ\n"
+            "`/stats` - посмотреть статистику\n\n"
+            "**Просто напишите вопрос** - и я отвечу! 🚀"
         )
+        
+        await update.message.reply_text(help_text)
+        
     except Exception as e:
-        logger.error(f"Ошибка в help_command: {e}")
+        logger.error(f"❌ Ошибка в help_command: {e}")
+        await update.message.reply_text("⚠️ Ошибка при показе справки")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик ошибок"""
-    logger.error(f"Ошибка при обработке сообщения: {context.error}")
+    """Глобальный обработчик ошибок"""
+    error = context.error
+    logger.error(f"🔥 Глобальная ошибка: {error}", exc_info=True)
+    
+    try:
+        if update and update.effective_message:
+            await update.effective_message.reply_text(
+                "😔 Произошла непредвиденная ошибка. "
+                "Попробуйте еще раз или используйте команду /help"
+            )
+    except Exception as e:
+        logger.error(f"❌ Ошибка при отправке сообщения об ошибке: {e}")
 
+# ==================== ЗАПУСК БОТА ====================
 def main():
-    """Основная функция"""
+    """Основная функция запуска бота"""
+    print("🚀 Запуск улучшенного мульти-AI бота...")
+    
     if not TELEGRAM_TOKEN:
         logger.error("❌ ОШИБКА: TELEGRAM_TOKEN не установлен!")
         return
@@ -362,27 +461,44 @@ def main():
         flask_thread.start()
         logger.info("✅ Flask сервер запущен на порту 5000")
         
-        logger.info("🚀 Запуск мульти-AI бота...")
+        # Запускаем систему поддержания активности
+        keep_bot_awake()
+        logger.info("✅ Система keep-alive запущена")
+        
+        # Создаем и настраиваем бота
         app_bot = Application.builder().token(TELEGRAM_TOKEN).build()
         
-        # Добавляем обработчик ошибок
+        # Добавляем глобальный обработчик ошибок
         app_bot.add_error_handler(error_handler)
         
         # Добавляем обработчики команд
-        app_bot.add_handler(CommandHandler("start", start))
-        app_bot.add_handler(CommandHandler("models", models_command))
-        app_bot.add_handler(CommandHandler("model", model_command))
-        app_bot.add_handler(CommandHandler("current", current_command))
-        app_bot.add_handler(CommandHandler("voice", voice_command))
-        app_bot.add_handler(CommandHandler("help", help_command))
-        app_bot.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
-        app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        handlers = [
+            CommandHandler("start", start),
+            CommandHandler("models", models_command),
+            CommandHandler("model", model_command),
+            CommandHandler("current", current_command),
+            CommandHandler("voice", voice_command),
+            CommandHandler("stats", stats_command),
+            CommandHandler("help", help_command),
+            MessageHandler(filters.VOICE, handle_voice_message),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+        ]
         
-        logger.info("✅ Мульти-AI бот успешно запущен!")
-        app_bot.run_polling(allowed_updates=Update.ALL_TYPES)
+        for handler in handlers:
+            app_bot.add_handler(handler)
+        
+        logger.info("✅ Все обработчики добавлены")
+        logger.info("🤖 Бот успешно запущен и готов к работе!")
+        
+        # Запускаем бота
+        app_bot.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
         
     except Exception as e:
-        logger.error(f"❌ Критическая ошибка при запуске бота: {e}")
+        logger.error(f"💥 Критическая ошибка при запуске бота: {e}")
+        raise
 
 if __name__ == '__main__':
-    main()
+    main()                     
